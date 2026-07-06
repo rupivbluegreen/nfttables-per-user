@@ -110,6 +110,53 @@ else
     ok "interactive exec denied on :2222 (ForceCommand /bin/false)"
 fi
 
+echo "== PAM service isolation (renamed PAM stack, independent of BoKS) =="
+# The tunnel daemon must use its own /etc/pam.d/sshd-tunnel, never the port-22
+# (BoKS stand-in) /etc/pam.d/sshd. An account-phase marker records which stack ran.
+markers=$(docker exec tfw-bastion cat /var/log/pam-markers.log 2>/dev/null)
+if printf '%s\n' "$markers" | grep -q '^sshd-tunnel:alice$'; then
+    ok "alice's tunnel auth ran the sshd-tunnel PAM stack"
+else
+    bad "alice's tunnel auth ran the sshd-tunnel PAM stack (markers: $(printf '%s' "$markers" | tr '\n' ' '))"
+fi
+if [ -n "$markers" ] && ! printf '%s\n' "$markers" | grep -vq '^sshd-tunnel:'; then
+    ok "no tunnel auth leaked into the shared 'sshd' PAM stack"
+else
+    bad "no tunnel auth leaked into the shared 'sshd' PAM stack (markers: $(printf '%s' "$markers" | tr '\n' ' '))"
+fi
+# Negative control: the port-22 stack denies at account; the :2222 tunnel tests
+# above still passed, so the two daemons do not share PAM state.
+if docker exec tfw-bastion grep -q 'pam_deny' /etc/pam.d/sshd; then
+    ok "port-22 PAM stack poisoned (pam_deny) yet :2222 tunnels passed"
+else
+    bad "port-22 PAM stack poisoned (pam_deny) yet :2222 tunnels passed (poison missing)"
+fi
+# Count pam_boks only in active (non-comment) lines — the file's own comment
+# explains that it deliberately omits pam_boks, so a naive grep matches that.
+if [ "$(docker exec tfw-bastion sh -c 'grep -vE "^[[:space:]]*#" /etc/pam.d/sshd-tunnel | grep -c pam_boks || true')" = 0 ]; then
+    ok "sshd-tunnel PAM stack contains no pam_boks (independent of BoKS)"
+else
+    bad "sshd-tunnel PAM stack contains no pam_boks"
+fi
+# Version-appropriate mechanism was applied by the setup script.
+sshver=$(docker exec tfw-bastion sh -c 'ssh -V 2>&1')
+mech=$(docker exec tfw-bastion sh -c '/opt/tunnelfw/sshd-tunnel-setup.sh --print-mechanism "$(ssh -V 2>&1)"' 2>/dev/null)
+if [ "$mech" = directive ]; then
+    docker exec tfw-bastion grep -q '^PAMServiceName sshd-tunnel' \
+        /etc/ssh/sshd_tunnel_config.d/00-pamservice.conf 2>/dev/null \
+        && ok "mechanism=directive for $sshver (PAMServiceName drop-in present)" \
+        || bad "mechanism=directive for $sshver but drop-in missing"
+elif [ "$mech" = symlink ]; then
+    if docker exec tfw-bastion test ! -e /etc/ssh/sshd_tunnel_config.d/00-pamservice.conf \
+       && docker exec tfw-bastion test -L /usr/sbin/sshd-tunnel; then
+        ok "mechanism=symlink for $sshver (no directive; sshd-tunnel symlink present)"
+    else
+        bad "mechanism=symlink for $sshver but symlink/drop-in state wrong"
+    fi
+else
+    bad "could not determine PAM mechanism (got: '$mech' for $sshver)"
+fi
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 echo "(lab left running; tear down with: docker compose -f $(pwd)/docker-compose.yml down -v)"

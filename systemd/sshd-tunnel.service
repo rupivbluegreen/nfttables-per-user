@@ -6,7 +6,12 @@ Wants=sshd-keygen.target
 
 [Service]
 Type=notify
-ExecStart=/usr/sbin/sshd -D -f /etc/ssh/sshd_tunnel_config
+# Runs as the sshd-tunnel symlink (absolute path preserves sshd re-exec). On
+# OpenSSH <= 9.7 the binary name selects PAM service "sshd-tunnel"; on >= 9.8 the
+# PAMServiceName directive does, and this name is merely cosmetic. See
+# sshd-tunnel-setup.sh, which must run before this unit is started.
+ExecStartPre=/usr/sbin/sshd-tunnel -t -f /etc/ssh/sshd_tunnel_config
+ExecStart=/usr/sbin/sshd-tunnel -D -f /etc/ssh/sshd_tunnel_config
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=process
 Restart=on-failure

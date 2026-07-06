@@ -166,7 +166,9 @@ ssh -p 2222 -N -L 18080:<disallowed>:80 <ad-user>@<bastion>   # forward fails / 
 # connecting (journal shows pam_unix/pam_sss entries tagged with the service name):
 journalctl -u sshd-tunnel -f
 # and verify the account stack in effect:
-sudo grep -H pam_boks /etc/pam.d/sshd-tunnel && echo "PROBLEM: pam_boks present" || echo "good: no pam_boks"
+# check active (non-comment) lines only — the file's comment mentions pam_boks:
+sudo grep -vE '^[[:space:]]*#' /etc/pam.d/sshd-tunnel | grep -q pam_boks \
+    && echo "PROBLEM: pam_boks present" || echo "good: no active pam_boks"
 ```
 
 Expected: allowed destination connects; disallowed one is blocked at the sshd `PermitOpen` layer and/or dropped by nftables; the tunnel daemon's PAM activity references `sshd-tunnel`.

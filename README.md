@@ -27,11 +27,14 @@ group is usually "Domain Users"), which packet socket GID matching can't see.
 | Path | Purpose |
 |------|---------|
 | `tunnelfw.sh` | The CLI. Generates and loads the nftables ruleset, syncs membership, emits the sshd snippet. |
+| `sshd-tunnel-setup.sh` | Version-aware installer for the tunnel daemon's own PAM service (`sshd-tunnel`): symlink on OpenSSH ≤ 9.7, `PAMServiceName` directive on ≥ 9.8. |
 | `config/tunnelfw.conf` | Global config: DNS resolvers, scope groups. |
 | `config/groups.d/*.conf` | One file per policy: `match=<group>` + `allow=` lines. |
 | `sshd/sshd_tunnel_config` | Tunnel-only OpenSSH daemon config for port 2222. |
+| `sshd/pam.d/sshd-tunnel` | PAM stack for the tunnel daemon — no `pam_boks`, so port 2222 is independent of BoKS. |
 | `systemd/` | `tunnelfw.service` (apply at boot), `tunnelfw-sync.timer` (periodic membership sync), `sshd-tunnel.service` (the second daemon). |
-| `lab/` | Self-contained Docker test lab: **real** Samba AD DC + SSSD-joined Rocky 9 bastion + target, with an end-to-end test suite. |
+| `docs/rhel9-boks-second-sshd-runbook.md` | Operator runbook for the RHEL 9 + BoKS deployment. |
+| `lab/` | Self-contained Docker test lab: **real** Samba AD DC + SSSD-joined Rocky 9 bastion + target, with an end-to-end test suite (proves per-daemon PAM isolation). See [`lab/README.md`](lab/README.md) for a full run-it-yourself how-to. |
 
 ## How the nftables policy is built
 
@@ -109,25 +112,25 @@ install -m 0644 config/groups.d/*.conf /etc/tunnelfw/groups.d/
 install -m 0644 systemd/*.service systemd/*.timer /etc/systemd/system/
 ```
 
-### 2. Second OpenSSH daemon on port 2222
+### 2. Second OpenSSH daemon on port 2222 (own PAM service, independent of BoKS)
 
 Feasible and standard on RHEL 9 — a second `sshd` runs from its own config and
-unit alongside the primary daemon on 22.
+unit alongside the primary daemon on 22. `sshd-tunnel-setup.sh` installs it with
+its **own PAM service name** (`sshd-tunnel`) so it does not share BoKS's
+`/etc/pam.d/sshd`; it auto-detects the OpenSSH version and applies the correct
+mechanism (symlink on ≤ 9.7, `PAMServiceName` directive on ≥ 9.8). Full details
+and manual steps: [`docs/rhel9-boks-second-sshd-runbook.md`](docs/rhel9-boks-second-sshd-runbook.md).
 
 ```bash
-install -m 0644 sshd/sshd_tunnel_config /etc/ssh/sshd_tunnel_config
-install -d -m 0755 /etc/ssh/sshd_tunnel_config.d
-tunnelfw.sh sshd-snippet > /etc/ssh/sshd_tunnel_config.d/50-groups.conf
+./sshd-tunnel-setup.sh --self-test          # sanity-check version detection
+sudo ./sshd-tunnel-setup.sh                 # symlink + config + /etc/pam.d/sshd-tunnel + drop-in + SELinux + validate
 
-# SELinux is enforcing on RHEL 9 — label the port or sshd cannot bind it:
-semanage port -a -t ssh_port_t -p tcp 2222
-
-# Open it (firewalld shown; the tunnelfw table lives in the output hook and
+# Open the port (firewalld shown; the tunnelfw table lives in the output hook and
 # coexists with firewalld, which polices input/forward):
-firewall-cmd --permanent --add-port=2222/tcp && firewall-cmd --reload
+sudo firewall-cmd --permanent --add-port=2222/tcp && sudo firewall-cmd --reload
 
-sshd -t -f /etc/ssh/sshd_tunnel_config      # validate before enabling
-systemctl enable --now sshd-tunnel.service
+sudo tunnelfw.sh sshd-snippet > /etc/ssh/sshd_tunnel_config.d/50-groups.conf
+sudo systemctl enable --now sshd-tunnel.service
 ```
 
 Public keys for AD users go in `/etc/ssh/tunnel_keys/<username>` (root-owned;
@@ -144,27 +147,36 @@ tunnelfw.sh status                             # verify
 
 ## ⚠️ BoKS coexistence checklist (verify on the real host)
 
-The target host is BoKS-managed. BoKS wraps authentication and login control on
-port 22; the second daemon on 2222 must be reconciled with it. **These items
-cannot be validated in the Docker lab** (BoKS is proprietary; the lab uses a
-stock port-22 `sshd` as a stand-in) — confirm each on the actual host:
+The target host is BoKS-managed. The tunnel daemon on 2222 runs **independently**
+of BoKS by using its own PAM service name — see the full walkthrough in
+[`docs/rhel9-boks-second-sshd-runbook.md`](docs/rhel9-boks-second-sshd-runbook.md).
+Confirm each item on the actual host:
 
-1. **Shared PAM service name.** OpenSSH always uses the PAM service `sshd`.
-   BoKS typically replaces `/etc/pam.d/sshd` with its own stack, so **BoKS PAM
-   modules will also run for port-2222 logins** and may reject AD users who are
-   not provisioned in BoKS. Inspect `/etc/pam.d/sshd` first, then choose:
-   - **Bypass PAM:** set `UsePAM no` in `sshd_tunnel_config` (pubkey-only means
-     you don't need PAM auth). Then pre-create home directories, because
-     `pam_oddjob_mkhomedir` won't run — or set `fallback_homedir` and provision
-     homes out of band.
-   - **Register with BoKS:** enroll the tunnel users / a route for port 2222 so
-     BoKS PAM permits them.
-2. **Audit / access-route bypass.** Port 2222 sidesteps BoKS access routes and
+1. **Give the tunnel daemon its own PAM service name (version-specific).** The
+   two daemons must not share `/etc/pam.d/sshd`. How OpenSSH selects its PAM
+   service name differs by version, and just changing `Port` is **not** enough —
+   the daemon would still read `/etc/pam.d/sshd`:
+   - **OpenSSH ≤ 9.7 (RHEL 9.0–9.7):** the service name is the binary's `argv[0]`
+     basename; there is no directive. Run the daemon as `/usr/sbin/sshd-tunnel`
+     (a symlink to `sshd`) by absolute path so it reads `/etc/pam.d/sshd-tunnel`.
+   - **OpenSSH ≥ 9.8 (RHEL 9.8+, current Rocky/Stream 9):** `argv[0]` is ignored;
+     add the directive `PAMServiceName sshd-tunnel` to the tunnel config.
+   `sshd-tunnel-setup.sh` auto-detects the version and applies the right one, and
+   installs `/etc/pam.d/sshd-tunnel` with **no `pam_boks`** — so BoKS never gates
+   2222. (The lab proves the PAM-service-name isolation; only the BoKS-specific
+   items below can't be exercised there.)
+2. **Don't let BoKS manage the file.** BoKS keeps port 22 via its own `boks_sshd`
+   fork and by default does not own `/etc/pam.d/sshd`. Confirm `sshd-tunnel` is
+   **not** listed in `/etc/opt/boksm/sysreplace.conf`, so BoKS's activate/deactivate
+   cycle won't overwrite it.
+3. **NSS resolution.** AD users must resolve via nsswitch (SSSD and/or BoKS) —
+   `tunnelfw.sh` relies on `getent group <tunnel-group>` returning the members.
+4. **Audit / access-route bypass.** Port 2222 sidesteps BoKS access routes and
    session logging by design. Get the BoKS owner's sign-off, and confirm BoKS
    isn't configured to detect or kill a foreign `sshd`.
-3. **Crypto policy.** RHEL 9's system-wide crypto policy applies to the second
+5. **Crypto policy.** RHEL 9's system-wide crypto policy applies to the second
    daemon too; make sure it satisfies whatever FIPS/hardening BoKS requires.
-4. **No port collision.** BoKS keeps port 22; the second daemon uses 2222 and a
+6. **No port collision.** BoKS keeps port 22; the second daemon uses 2222 and a
    separate `PidFile` (`/run/sshd_tunnel.pid`). Verify nothing else claims 2222.
 
 ## Testing: the Docker AD lab

@@ -15,8 +15,10 @@ KbdInteractiveAuthentication no
 PermitRootLogin no
 AuthorizedKeysFile /etc/ssh/tunnel_keys/%u
 StrictModes yes
-# On a BoKS host the PAM service "sshd" may carry BoKS modules; see README
-# ("BoKS checklist") before deciding UsePAM here.
+# This daemon uses its own PAM service name "sshd-tunnel" (-> /etc/pam.d/sshd-tunnel),
+# set up by sshd-tunnel-setup.sh: a PAMServiceName directive on OpenSSH >= 9.8, or
+# running as the /usr/sbin/sshd-tunnel symlink on <= 9.7. That stack contains no
+# pam_boks, so port 2222 stays independent of the BoKS-managed sshd on port 22.
 UsePAM yes
 
 # Scope: only members of the umbrella tunnel group may connect at all.

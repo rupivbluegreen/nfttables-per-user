@@ -1,0 +1,17 @@
+#%PAM-1.0
+# PAM stack for the tunnel-only sshd (PAM service name: sshd-tunnel).
+#
+# Deliberately contains NO pam_boks: port 2222 is independent of BoKS, which
+# governs port 22 through its own boks_sshd + PAM service. Because this stack
+# has a distinct service name, the two daemons do not share PAM state.
+#
+# The daemon is pubkey-only (PasswordAuthentication no, KbdInteractive no), so
+# sshd never invokes the PAM auth phase; account + session still run under
+# UsePAM yes. account requires a valid AD account (via SSSD); disabled/expired
+# AD accounts are rejected here even though the key is accepted.
+auth       required   pam_deny.so
+account    required   pam_sss.so
+password   required   pam_deny.so
+session    required   pam_limits.so
+session    optional   pam_sss.so
+session    optional   pam_mkhomedir.so umask=0077
