@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenSSH tunnel-only daemon (port 2222)
+Documentation=man:sshd(8) man:sshd_config(5)
+After=network.target sshd-keygen.target sssd.service
+Wants=sshd-keygen.target
+
+[Service]
+Type=notify
+ExecStart=/usr/sbin/sshd -D -f /etc/ssh/sshd_tunnel_config
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=42s
+
+[Install]
+WantedBy=multi-user.target

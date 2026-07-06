@@ -1,0 +1,8 @@
+[Unit]
+Description=tunnelfw — re-sync AD group membership into uid sets
+After=sssd.service
+Requisite=tunnelfw.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tunnelfw.sh sync

@@ -1,0 +1,13 @@
+[Unit]
+Description=tunnelfw — apply per-AD-group egress policy
+After=network-online.target sssd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/tunnelfw.sh apply
+ExecStop=/usr/local/sbin/tunnelfw.sh flush
+
+[Install]
+WantedBy=multi-user.target

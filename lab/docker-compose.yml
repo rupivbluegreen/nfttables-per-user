@@ -1,0 +1,60 @@
+name: tunnelfw-lab
+
+networks:
+  tunnellab:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+services:
+  dc:
+    build: ./dc
+    container_name: tfw-dc
+    hostname: dc
+    # Samba stores sysvol NT ACLs in the security.NTACL xattr; writing the
+    # security.* namespace needs CAP_SYS_ADMIN, which Docker drops by default.
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      REALM: TUNNEL.LAB
+      DOMAIN: TUNNEL
+      ADMIN_PASS: "Adm1nPass!Lab"
+    networks:
+      tunnellab:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "samba-tool", "domain", "info", "127.0.0.1"]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+      start_period: 20s
+
+  bastion:
+    build: ./bastion
+    container_name: tfw-bastion
+    hostname: bastion.tunnel.lab
+    dns:
+      - 172.30.0.10
+    dns_search:
+      - tunnel.lab
+    cap_add:
+      - NET_ADMIN
+    environment:
+      REALM: TUNNEL.LAB
+      ADMIN_PASS: "Adm1nPass!Lab"
+    depends_on:
+      dc:
+        condition: service_healthy
+    networks:
+      tunnellab:
+        ipv4_address: 172.30.0.20
+    volumes:
+      - ..:/opt/tunnelfw:ro
+      - ./keys/pub:/opt/tunnel_keys_src:ro
+
+  target:
+    build: ./target
+    container_name: tfw-target
+    networks:
+      tunnellab:
+        ipv4_address: 172.30.0.30
